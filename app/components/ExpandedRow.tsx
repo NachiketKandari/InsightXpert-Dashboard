@@ -97,9 +97,9 @@ export default function ExpandedRow({ record: r, colSpan, hasDiagnosis }: Props)
             </p>
           </div>
         )}
+        <SqlRunner dbId={r.db} predSql={predSql} goldSql={goldSql} />
         {!IS_HOSTED && (
           <>
-            <SqlRunner dbId={r.db} predSql={predSql} goldSql={goldSql} />
             {r.prompt && (
               <PromptRunner
                 initialPrompt={r.prompt}
