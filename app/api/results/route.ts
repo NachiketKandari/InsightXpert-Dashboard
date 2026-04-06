@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { RESULTS_DIR } from "../../lib/paths";
+import { listResultKeys, getResultText } from "../../lib/r2";
 
 export const runtime = "nodejs";
 
@@ -96,18 +97,76 @@ function readSummary(filePath: string): ResultSummary | null {
 
 const IS_HOSTED = process.env.NEXT_PUBLIC_MODE === "hosted";
 
+/** Extract summary from raw JSON text without parsing the full results array. */
+function extractSummaryFromText(
+  content: string,
+  key: string
+): ResultSummary | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let data: any;
+    const resultsIdx = content.indexOf('"results"');
+    if (resultsIdx > 0) {
+      const truncated =
+        content.slice(0, resultsIdx).replace(/,\s*$/, "") + "}";
+      try {
+        data = JSON.parse(truncated);
+      } catch {
+        data = JSON.parse(content);
+      }
+    } else {
+      data = JSON.parse(content);
+    }
+
+    const dirName = path.dirname(key);
+    const match = path.basename(key).match(/eval_results_(\d{8}_\d{6})/);
+    const timestamp = match ? match[1] : "";
+
+    return {
+      id: hashPath(key),
+      filePath: key,
+      dirName,
+      timestamp,
+      total: data.total ?? 0,
+      correct: data.correct ?? 0,
+      accuracy: data.accuracy ?? 0,
+      accuracyRelaxed: data.accuracy_relaxed ?? 0,
+      byDifficulty: data.by_difficulty ?? {},
+      runConfig: data.run_config ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function GET() {
   try {
-    // In hosted mode, serve the pre-built manifest instead of scanning filesystem
+    // In hosted mode, fetch from R2
     if (IS_HOSTED) {
-      const manifestPath = path.join(process.cwd(), "public", "data", "manifest.json");
-      if (fs.existsSync(manifestPath)) {
-        const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
-        return NextResponse.json(manifest, {
-          headers: { "Cache-Control": "public, max-age=300" },
-        });
-      }
-      return NextResponse.json({ results: [] });
+      const keys = await listResultKeys();
+      const jsonKeys = keys.filter(
+        (k) => k.startsWith("eval_results_") || k.includes("/eval_results_")
+      );
+
+      const summaries: ResultSummary[] = [];
+      await Promise.all(
+        jsonKeys.map(async (key) => {
+          try {
+            const text = await getResultText(key);
+            const summary = extractSummaryFromText(text, key);
+            if (summary) summaries.push(summary);
+          } catch {
+            // skip unreadable files
+          }
+        })
+      );
+
+      summaries.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+
+      return NextResponse.json(
+        { results: summaries },
+        { headers: { "Cache-Control": "public, max-age=300" } }
+      );
     }
 
     const files = findResultFiles(RESULTS_DIR);

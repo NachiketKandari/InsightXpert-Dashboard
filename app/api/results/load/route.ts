@@ -2,8 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { RESULTS_DIR } from "../../../lib/paths";
+import { getResultJson } from "../../../lib/r2";
 
 export const runtime = "nodejs";
+
+const IS_HOSTED = process.env.NEXT_PUBLIC_MODE === "hosted";
 
 export async function GET(req: NextRequest) {
   try {
@@ -15,7 +18,30 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // Resolve and validate — must be within RESULTS_DIR (prevent path traversal)
+    // Block path traversal attempts
+    if (relPath.includes("..")) {
+      return NextResponse.json(
+        { error: "Invalid path" },
+        { status: 400 }
+      );
+    }
+
+    // In hosted mode, fetch from R2
+    if (IS_HOSTED) {
+      try {
+        const data = await getResultJson(relPath);
+        return NextResponse.json(data, {
+          headers: { "Cache-Control": "public, max-age=300" },
+        });
+      } catch {
+        return NextResponse.json(
+          { error: `File not found: ${relPath}` },
+          { status: 404 }
+        );
+      }
+    }
+
+    // Local mode: read from filesystem
     const resolved = path.resolve(RESULTS_DIR, relPath);
     if (!resolved.startsWith(RESULTS_DIR)) {
       return NextResponse.json(
