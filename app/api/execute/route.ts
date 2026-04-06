@@ -14,7 +14,7 @@ function tursoDbName(dbId: string): string {
 async function executeOnTurso(dbId: string, sql: string) {
   const { createClient } = await import("@libsql/client");
   const tursoName = tursoDbName(dbId);
-  const url = `libsql://${tursoName}-${process.env.TURSO_ORG}.turso.io`;
+  const url = `https://${tursoName}-${process.env.TURSO_ORG}.turso.io`;
 
   const client = createClient({
     url,
