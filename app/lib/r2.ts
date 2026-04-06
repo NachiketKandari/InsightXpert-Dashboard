@@ -1,80 +1,65 @@
-import {
-  S3Client,
-  ListObjectsV2Command,
-  GetObjectCommand,
-} from "@aws-sdk/client-s3";
+/**
+ * R2 access via Cloudflare API (listing) and public r2.dev URL (fetching).
+ * No AWS SDK — plain fetch, works on any runtime including Vercel serverless.
+ */
 
-const IS_HOSTED = process.env.NEXT_PUBLIC_MODE === "hosted";
-
-let _client: S3Client | null = null;
-
-function getClient(): S3Client {
-  if (!_client) {
-    _client = new S3Client({
-      region: "auto",
-      endpoint: process.env.R2_ENDPOINT!,
-      credentials: {
-        accessKeyId: process.env.R2_ACCESS_KEY_ID!,
-        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
-      },
-    });
-  }
-  return _client;
-}
-
+const ACCOUNT_ID = process.env.R2_ACCOUNT_ID!;
+const CF_API_TOKEN = process.env.R2_API_TOKEN!;
 const BUCKET = process.env.R2_BUCKET || "insightxpert-results";
+const PUBLIC_DOMAIN = process.env.R2_PUBLIC_DOMAIN!; // e.g. pub-xxx.r2.dev
 
-/** List all object keys in the R2 bucket. */
+/** List all object keys in the R2 bucket via Cloudflare API. */
 export async function listResultKeys(): Promise<string[]> {
-  const client = getClient();
   const keys: string[] = [];
-  let continuationToken: string | undefined;
+  let cursor: string | undefined;
 
   do {
-    const resp = await client.send(
-      new ListObjectsV2Command({
-        Bucket: BUCKET,
-        ContinuationToken: continuationToken,
-      })
+    const url = new URL(
+      `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/r2/buckets/${BUCKET}/objects`
     );
-    for (const obj of resp.Contents ?? []) {
-      if (obj.Key) keys.push(obj.Key);
+    url.searchParams.set("per_page", "500");
+    if (cursor) url.searchParams.set("cursor", cursor);
+
+    const resp = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${CF_API_TOKEN}` },
+    });
+
+    if (!resp.ok) {
+      throw new Error(`R2 list failed: ${resp.status} ${await resp.text()}`);
     }
-    continuationToken = resp.IsTruncated
-      ? resp.NextContinuationToken
-      : undefined;
-  } while (continuationToken);
+
+    const json = await resp.json();
+    const result = (json as { result: { key: string }[] }).result;
+    for (const obj of result) {
+      keys.push(obj.key);
+    }
+
+    // Cloudflare API uses cursor-based pagination
+    const info = (json as { result_info?: { cursor?: string; count?: number } })
+      .result_info;
+    cursor =
+      info && info.count && info.count >= 500 ? info.cursor : undefined;
+  } while (cursor);
 
   return keys;
 }
 
-/** Read S3 response body as string, works across Node.js and Vercel runtimes. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function bodyToString(body: any): Promise<string> {
-  if (typeof body.transformToString === "function") {
-    return body.transformToString("utf-8");
-  }
-  // Vercel runtime: body is a ReadableStream/Blob — wrap in Response to read
-  return new Response(body).text();
-}
-
-/** Fetch a JSON file from R2 by key and return parsed content. */
+/** Fetch a JSON file from R2 via public URL and return parsed content. */
 export async function getResultJson(key: string): Promise<unknown> {
-  const client = getClient();
-  const resp = await client.send(
-    new GetObjectCommand({ Bucket: BUCKET, Key: key })
-  );
-  const text = await bodyToString(resp.Body!);
-  return JSON.parse(text);
+  const url = `https://${PUBLIC_DOMAIN}/${encodeURIComponent(key).replace(/%2F/g, "/")}`;
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(`R2 fetch failed for ${key}: ${resp.status}`);
+  }
+  return resp.json();
 }
 
-/** Fetch raw text from R2 (for summary extraction without full parse). */
+/** Fetch raw text from R2 via public URL. */
 export async function getResultText(key: string): Promise<string> {
-  const client = getClient();
-  const resp = await client.send(
-    new GetObjectCommand({ Bucket: BUCKET, Key: key })
-  );
-  return bodyToString(resp.Body!);
+  const url = `https://${PUBLIC_DOMAIN}/${encodeURIComponent(key).replace(/%2F/g, "/")}`;
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(`R2 fetch failed for ${key}: ${resp.status}`);
+  }
+  return resp.text();
 }
-
-export { IS_HOSTED };

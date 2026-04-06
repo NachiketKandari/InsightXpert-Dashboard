@@ -6,12 +6,11 @@
  * Usage:
  *   node scripts/upload-to-r2.mjs [--source <dir>]
  *
- * Requires env vars: R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT, R2_BUCKET
+ * Requires env vars: R2_ACCOUNT_ID, R2_API_TOKEN, R2_BUCKET
  */
 
 import fs from "fs";
 import path from "path";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { parseArgs } from "util";
 
 const { values } = parseArgs({
@@ -21,17 +20,14 @@ const { values } = parseArgs({
 });
 
 const SOURCE_DIR = path.resolve(values.source);
-
-const client = new S3Client({
-  region: "auto",
-  endpoint: process.env.R2_ENDPOINT,
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
-  },
-});
-
+const ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
+const API_TOKEN = process.env.R2_API_TOKEN;
 const BUCKET = process.env.R2_BUCKET || "insightxpert-results";
+
+if (!ACCOUNT_ID || !API_TOKEN) {
+  console.error("Error: R2_ACCOUNT_ID and R2_API_TOKEN env vars are required");
+  process.exit(1);
+}
 
 function findResultFiles(dir) {
   const results = [];
@@ -57,12 +53,18 @@ for (const file of files) {
   const key = path.relative(SOURCE_DIR, file);
   const body = fs.readFileSync(file);
   try {
-    await client.send(new PutObjectCommand({
-      Bucket: BUCKET,
-      Key: key,
-      Body: body,
-      ContentType: "application/json",
-    }));
+    const url = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/r2/buckets/${BUCKET}/objects/${encodeURIComponent(key)}`;
+    const resp = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body,
+    });
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+    }
     uploaded++;
     process.stdout.write(`\r  Uploaded ${uploaded}/${files.length}`);
   } catch (err) {
