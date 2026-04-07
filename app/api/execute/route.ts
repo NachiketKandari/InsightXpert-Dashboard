@@ -14,11 +14,23 @@ function tursoDbName(dbId: string): string {
 async function executeOnTurso(dbId: string, sql: string) {
   const { createClient } = await import("@libsql/client/web");
   const tursoName = tursoDbName(dbId);
-  const url = `https://${tursoName}-${process.env.TURSO_ORG}.${process.env.TURSO_REGION || "aws-ap-south-1"}.turso.io`;
+  const org = process.env.TURSO_ORG;
+  const region = process.env.TURSO_REGION || "aws-ap-south-1";
+  const token = process.env.TURSO_AUTH_TOKEN;
+
+  if (!org || !token) {
+    return NextResponse.json({
+      error: `Turso not configured: TURSO_ORG=${org ? "set" : "missing"}, TURSO_AUTH_TOKEN=${token ? "set" : "missing"}`,
+      columns: [],
+      rows: [],
+    });
+  }
+
+  const url = `https://${tursoName}-${org}.${region}.turso.io`;
 
   const client = createClient({
     url,
-    authToken: process.env.TURSO_AUTH_TOKEN,
+    authToken: token,
   });
 
   try {
