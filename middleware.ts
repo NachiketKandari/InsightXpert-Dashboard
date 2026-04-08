@@ -1,25 +1,50 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createHmac } from "crypto";
 
 /**
  * Simple session-cookie auth middleware.
+ * Uses Web Crypto API (Edge-compatible) instead of Node.js crypto.
  * If AUTH_USERNAME and AUTH_PASSWORD are not set, all requests pass through.
  */
 
-const AUTH_USERNAME = process.env.AUTH_USERNAME ?? "";
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD ?? "";
-const AUTH_ENABLED = AUTH_USERNAME.length > 0 && AUTH_PASSWORD.length > 0;
+const AUTH_ENABLED =
+  (process.env.AUTH_USERNAME ?? "").length > 0 && AUTH_PASSWORD.length > 0;
 
-function isValidSession(cookie: string): boolean {
+/** Import HMAC key from password string (cached after first call). */
+let keyPromise: Promise<CryptoKey> | null = null;
+function getKey(): Promise<CryptoKey> {
+  if (!keyPromise) {
+    keyPromise = crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(AUTH_PASSWORD),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign", "verify"],
+    );
+  }
+  return keyPromise;
+}
+
+/** Hex-encode an ArrayBuffer. */
+function toHex(buf: ArrayBuffer): string {
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function isValidSession(cookie: string): Promise<boolean> {
   const dotIdx = cookie.lastIndexOf(".");
   if (dotIdx === -1) return false;
 
   const payload = cookie.slice(0, dotIdx);
   const sig = cookie.slice(dotIdx + 1);
 
-  // Verify HMAC signature
-  const decoded = Buffer.from(payload, "base64").toString();
-  const expected = createHmac("sha256", AUTH_PASSWORD).update(decoded).digest("hex");
+  // Decode payload and compute expected HMAC
+  const decoded = atob(payload);
+  const key = await getKey();
+  const expected = toHex(
+    await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(decoded)),
+  );
 
   // Constant-time compare
   if (sig.length !== expected.length) return false;
@@ -30,7 +55,7 @@ function isValidSession(cookie: string): boolean {
   return diff === 0;
 }
 
-export function middleware(req: NextRequest) {
+export async function middleware(req: NextRequest) {
   // Auth disabled — pass everything through
   if (!AUTH_ENABLED) return NextResponse.next();
 
@@ -52,7 +77,7 @@ export function middleware(req: NextRequest) {
 
   // Check session cookie
   const session = req.cookies.get("ix-session")?.value;
-  if (session && isValidSession(session)) {
+  if (session && (await isValidSession(session))) {
     return NextResponse.next();
   }
 
