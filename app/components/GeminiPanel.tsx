@@ -91,6 +91,8 @@ export default function GeminiPanel({
   );
   const [editedSchema, setEditedSchema] = useState(originalSchema?.schema ?? "");
   const [perfectSchema, setPerfectSchema] = useState<string | null>(null);
+  const [perfectEvidence, setPerfectEvidence] = useState<string | null>(null);
+  const [includeEvidence, setIncludeEvidence] = useState(true);
   const [perfectLoading, setPerfectLoading] = useState(false);
   const [perfectError, setPerfectError] = useState<string | null>(null);
   const [linkResult, setLinkResult] = useState<GeminiResult | null>(null);
@@ -116,11 +118,22 @@ export default function GeminiPanel({
     [clearTimer],
   );
 
-  /** Rebuild the full prompt with the edited schema section. */
-  const rebuiltPrompt = useMemo(() => {
+  /** Build a prompt with a given schema and optional evidence injected. */
+  function buildPrompt(schema: string, evidence?: string | null): string {
     if (!originalSchema) return sqlPrompt;
-    return `${originalSchema.before}\n${editedSchema}\n\n${originalSchema.after}`;
-  }, [originalSchema, editedSchema, sqlPrompt]);
+    const evidenceBlock =
+      evidence && includeEvidence
+        ? `\n\n== Evidence ==\n${evidence}\n`
+        : "";
+    return `${originalSchema.before}\n${schema}${evidenceBlock}\n\n${originalSchema.after}`;
+  }
+
+  /** Rebuild the full prompt with the edited schema section. */
+  const rebuiltPrompt = useMemo(
+    () => buildPrompt(editedSchema, perfectEvidence),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [originalSchema, editedSchema, perfectEvidence, includeEvidence, sqlPrompt],
+  );
 
   const schemaEdited = originalSchema
     ? editedSchema !== originalSchema.schema
@@ -180,16 +193,18 @@ export default function GeminiPanel({
     setLinkLoading(false);
   }
 
-  /** Apply edited schema back into the SQL gen prompt */
+  /** Apply edited schema (and optionally evidence) back into the SQL gen prompt */
   function applySchemaToPrompt() {
     if (!originalSchema) return;
-    const newPrompt = `${originalSchema.before}\n${editedSchema}\n\n${originalSchema.after}`;
-    setSqlPrompt(newPrompt);
+    setSqlPrompt(buildPrompt(editedSchema, perfectEvidence));
     setTab("sql-gen");
   }
 
-  /** Fetch perfect schema linking for this question */
-  async function fetchPerfectSchema() {
+  /** Fetch perfect schema + evidence for this question. Returns { schema, evidence }. */
+  async function fetchPerfectData(): Promise<{
+    schema: string;
+    evidence: string;
+  } | null> {
     setPerfectLoading(true);
     setPerfectError(null);
     try {
@@ -199,51 +214,35 @@ export default function GeminiPanel({
       const data = await res.json();
       if (data.error) {
         setPerfectError(data.error);
-      } else {
-        setPerfectSchema(data.schema);
-        setEditedSchema(data.schema);
+        return null;
       }
+      setPerfectSchema(data.schema);
+      setPerfectEvidence(data.evidence || "");
+      setEditedSchema(data.schema);
+      return { schema: data.schema, evidence: data.evidence || "" };
     } catch (e: unknown) {
       setPerfectError(e instanceof Error ? e.message : String(e));
+      return null;
     } finally {
       setPerfectLoading(false);
     }
   }
 
-  /** Run with perfect schema: swap in perfect schema and run immediately */
+  /** Run with perfect schema (and optionally evidence) */
   async function runWithPerfectSchema() {
     if (!originalSchema) return;
 
-    // Fetch perfect schema if not already loaded
     let schema = perfectSchema;
+    let evidence = perfectEvidence;
     if (!schema) {
-      setPerfectLoading(true);
-      setPerfectError(null);
-      try {
-        const res = await fetch(
-          `/api/perfect-schema?question=${encodeURIComponent(question)}`,
-        );
-        const data = await res.json();
-        if (data.error) {
-          setPerfectError(data.error);
-          setPerfectLoading(false);
-          return;
-        }
-        schema = data.schema;
-        setPerfectSchema(data.schema);
-        setEditedSchema(data.schema);
-      } catch (e: unknown) {
-        setPerfectError(e instanceof Error ? e.message : String(e));
-        setPerfectLoading(false);
-        return;
-      } finally {
-        setPerfectLoading(false);
-      }
+      const result = await fetchPerfectData();
+      if (!result) return;
+      schema = result.schema;
+      evidence = result.evidence;
     }
 
-    // Build prompt with perfect schema and run
-    const perfectPrompt = `${originalSchema.before}\n${schema}\n\n${originalSchema.after}`;
-    runGemini(perfectPrompt, setLinkResult, setLinkLoading, setLinkError, setLinkElapsed);
+    const prompt = buildPrompt(schema!, evidence);
+    runGemini(prompt, setLinkResult, setLinkLoading, setLinkError, setLinkElapsed);
   }
 
   if (!open) {
@@ -598,6 +597,18 @@ export default function GeminiPanel({
                     load perfect schema
                   </button>
                 )}
+                {/* Evidence toggle */}
+                <label className="flex items-center gap-1.5 cursor-pointer ml-auto">
+                  <input
+                    type="checkbox"
+                    checked={includeEvidence}
+                    onChange={(e) => setIncludeEvidence(e.target.checked)}
+                    className="w-3 h-3 rounded border-gray-600 accent-amber-500"
+                  />
+                  <span className="text-[10px] text-gray-500">
+                    Include Evidence
+                  </span>
+                </label>
                 {linkLoading && (
                   <>
                     <span className="text-xs text-gray-500 tabular-nums">
@@ -617,6 +628,23 @@ export default function GeminiPanel({
               {perfectError && (
                 <div className="text-[10px] text-amber-400">
                   Perfect schema: {perfectError}
+                </div>
+              )}
+
+              {/* Evidence display */}
+              {perfectEvidence && (
+                <div className="rounded-md border border-amber-900/30 bg-amber-950/10 px-3 py-2">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-500">
+                      Evidence
+                    </span>
+                    {!includeEvidence && (
+                      <span className="text-[10px] text-gray-600">(excluded from prompt)</span>
+                    )}
+                  </div>
+                  <p className="text-xs text-amber-200/80 leading-relaxed">
+                    {perfectEvidence}
+                  </p>
                 </div>
               )}
 

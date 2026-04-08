@@ -9,52 +9,68 @@ const LINKING_FILES = [
   "perfect_linking_bird_dev.json",
 ];
 
-let cache: Record<string, string> | null = null;
+interface PerfectEntry {
+  question_id: number;
+  question: string;
+  evidence: string;
+  db_id: string;
+  difficulty: string;
+  schema_text: string;
+}
 
-/** Load and merge all perfect linking files into a single question→schema map. */
-function loadPerfectLinking(): Record<string, string> {
+/** question text (lowercased, trimmed) → PerfectEntry */
+let cache: Map<string, PerfectEntry> | null = null;
+
+function loadPerfectLinking(): Map<string, PerfectEntry> {
   if (cache) return cache;
 
-  const merged: Record<string, string> = {};
+  cache = new Map();
   for (const file of LINKING_FILES) {
     const filePath = path.join(DATA_DIR, file);
-    if (fs.existsSync(filePath)) {
-      const raw = fs.readFileSync(filePath, "utf-8");
-      const data = JSON.parse(raw) as Record<string, string>;
-      Object.assign(merged, data);
+    if (!fs.existsSync(filePath)) continue;
+
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const data = JSON.parse(raw) as Record<string, PerfectEntry>;
+
+    for (const entry of Object.values(data)) {
+      const key = entry.question.trim().toLowerCase();
+      cache.set(key, entry);
     }
   }
 
-  cache = merged;
   return cache;
 }
 
 /**
  * GET /api/perfect-schema?question=...
- * Returns the perfect-linked schema for a question.
- * Searches across both mini_dev and bird_dev perfect linking files.
+ * Returns the perfect-linked schema and evidence for a question.
  */
 export async function GET(req: NextRequest) {
   const question = req.nextUrl.searchParams.get("question");
 
   if (!question) {
-    return NextResponse.json({ error: "question parameter is required" }, { status: 400 });
+    return NextResponse.json(
+      { error: "question parameter is required" },
+      { status: 400 },
+    );
   }
 
   const mapping = loadPerfectLinking();
+  const key = question.trim().toLowerCase();
+  const entry = mapping.get(key);
 
-  // Exact match first
-  if (mapping[question]) {
-    return NextResponse.json({ schema: mapping[question], match: "exact" });
+  if (entry) {
+    return NextResponse.json({
+      schema: entry.schema_text,
+      evidence: entry.evidence || "",
+      db_id: entry.db_id,
+      difficulty: entry.difficulty,
+      question_id: entry.question_id,
+    });
   }
 
-  // Try case-insensitive / trimmed match
-  const normalizedQ = question.trim().toLowerCase();
-  for (const [key, value] of Object.entries(mapping)) {
-    if (key.trim().toLowerCase() === normalizedQ) {
-      return NextResponse.json({ schema: value, match: "normalized" });
-    }
-  }
-
-  return NextResponse.json({ error: "No perfect schema found for this question" }, { status: 404 });
+  return NextResponse.json(
+    { error: "No perfect schema found for this question" },
+    { status: 404 },
+  );
 }
