@@ -5,6 +5,7 @@ import type { DiagnosisRecord } from "../lib/types";
 import SqlRunner from "./SqlRunner";
 import PromptRunner from "./PromptRunner";
 import PipelineRerunPanel from "./PipelineRerunPanel";
+import GeminiPanel from "./GeminiPanel";
 
 const IS_HOSTED = process.env.NEXT_PUBLIC_MODE === "hosted";
 
@@ -98,6 +99,13 @@ export default function ExpandedRow({ record: r, colSpan, hasDiagnosis }: Props)
           </div>
         )}
         <SqlRunner dbId={r.db} predSql={predSql} goldSql={goldSql} />
+        <GeminiPanel
+          question={r.q}
+          dbId={r.db}
+          goldSql={r.gold_sql}
+          predSql={r.pred_sql}
+          pipelinePrompt={r.prompt}
+        />
         {!IS_HOSTED && (
           <>
             {r.prompt && (
