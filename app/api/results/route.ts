@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { RESULTS_DIR } from "../../lib/paths";
-import { listResultKeys, getResultText } from "../../lib/r2";
+import { getResultJson } from "../../lib/r2";
 
 export const runtime = "nodejs";
+
+const R2_PUBLIC_DOMAIN = process.env.R2_PUBLIC_DOMAIN;
 
 interface ResultSummary {
   id: string;
@@ -28,7 +30,15 @@ function hashPath(p: string): string {
   return Math.abs(h).toString(36);
 }
 
-/** Recursively find all eval_results_*.json files. */
+/** Check if filename is a result or diagnosis JSON. */
+function isResultFile(name: string): boolean {
+  return (
+    (name.startsWith("eval_results_") || name.startsWith("diagnosed_")) &&
+    name.endsWith(".json")
+  );
+}
+
+/** Recursively find all result/diagnosis JSON files. */
 function findResultFiles(dir: string): string[] {
   const results: string[] = [];
   if (!fs.existsSync(dir)) return results;
@@ -38,11 +48,7 @@ function findResultFiles(dir: string): string[] {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       results.push(...findResultFiles(fullPath));
-    } else if (
-      entry.isFile() &&
-      entry.name.startsWith("eval_results_") &&
-      entry.name.endsWith(".json")
-    ) {
+    } else if (entry.isFile() && isResultFile(entry.name)) {
       results.push(fullPath);
     }
   }
@@ -54,8 +60,6 @@ function readSummary(filePath: string): ResultSummary | null {
   try {
     const content = fs.readFileSync(filePath, "utf-8");
 
-    // Optimisation: try to parse only summary fields by truncating before
-    // the large "results" array. Falls back to full parse on failure.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let data: any;
     const resultsIdx = content.indexOf('"results"');
@@ -74,7 +78,6 @@ function readSummary(filePath: string): ResultSummary | null {
     const relPath = path.relative(RESULTS_DIR, filePath);
     const dirName = path.dirname(relPath);
 
-    // Extract timestamp from filename: eval_results_YYYYMMDD_HHMMSS.json
     const match = path.basename(filePath).match(/eval_results_(\d{8}_\d{6})/);
     const timestamp = match ? match[1] : "";
 
@@ -97,78 +100,23 @@ function readSummary(filePath: string): ResultSummary | null {
 
 const IS_HOSTED = process.env.NEXT_PUBLIC_MODE === "hosted";
 
-/** Extract summary from raw JSON text without parsing the full results array. */
-function extractSummaryFromText(
-  content: string,
-  key: string
-): ResultSummary | null {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let data: any;
-    const resultsIdx = content.indexOf('"results"');
-    if (resultsIdx > 0) {
-      const truncated =
-        content.slice(0, resultsIdx).replace(/,\s*$/, "") + "}";
-      try {
-        data = JSON.parse(truncated);
-      } catch {
-        data = JSON.parse(content);
-      }
-    } else {
-      data = JSON.parse(content);
-    }
-
-    const dirName = path.dirname(key);
-    const match = path.basename(key).match(/eval_results_(\d{8}_\d{6})/);
-    const timestamp = match ? match[1] : "";
-
-    return {
-      id: hashPath(key),
-      filePath: key,
-      dirName,
-      timestamp,
-      total: data.total ?? 0,
-      correct: data.correct ?? 0,
-      accuracy: data.accuracy ?? 0,
-      accuracyRelaxed: data.accuracy_relaxed ?? 0,
-      byDifficulty: data.by_difficulty ?? {},
-      runConfig: data.run_config ?? null,
-    };
-  } catch {
-    return null;
-  }
-}
-
 export async function GET() {
   try {
-    // In hosted mode, fetch from R2
-    if (IS_HOSTED) {
-      const keys = await listResultKeys();
-      const jsonKeys = keys.filter(
-        (k) => k.startsWith("eval_results_") || k.includes("/eval_results_")
-      );
-
-      const summaries: ResultSummary[] = [];
-      await Promise.all(
-        jsonKeys.map(async (key) => {
-          try {
-            const text = await getResultText(key);
-            const summary = extractSummaryFromText(text, key);
-            if (summary) summaries.push(summary);
-          } catch {
-            // skip unreadable files
-          }
-        })
-      );
-
-      summaries.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-
-      return NextResponse.json(
-        { results: summaries },
-        { headers: { "Cache-Control": "public, max-age=300" } }
-      );
+    // In hosted mode, fetch the pre-built manifest from R2 (single request)
+    if (IS_HOSTED && R2_PUBLIC_DOMAIN) {
+      const manifestUrl = `https://${R2_PUBLIC_DOMAIN}/_manifest.json`;
+      const resp = await fetch(manifestUrl);
+      if (resp.ok) {
+        const manifest = await resp.json();
+        return NextResponse.json(manifest, {
+          headers: { "Cache-Control": "public, max-age=300" },
+        });
+      }
+      // Fallback: return empty
+      return NextResponse.json({ results: [] });
     }
 
+    // Local mode: scan filesystem
     const files = findResultFiles(RESULTS_DIR);
     const summaries: ResultSummary[] = [];
 
@@ -177,7 +125,6 @@ export async function GET() {
       if (summary) summaries.push(summary);
     }
 
-    // Sort newest first (by timestamp descending)
     summaries.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
     return NextResponse.json(

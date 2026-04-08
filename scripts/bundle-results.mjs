@@ -37,7 +37,7 @@ function findResultFiles(dir) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       results.push(...findResultFiles(fullPath));
-    } else if (entry.isFile() && entry.name.startsWith("eval_results_") && entry.name.endsWith(".json")) {
+    } else if (entry.isFile() && (entry.name.startsWith("eval_results_") || entry.name.startsWith("diagnosed_")) && entry.name.endsWith(".json")) {
       results.push(fullPath);
     }
   }
