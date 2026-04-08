@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import SqlRunner from "./SqlRunner";
 
 interface Props {
@@ -19,54 +19,40 @@ const THINKING_LEVELS: ThinkingLevel[] = ["none", "low", "medium", "high"];
 const DEFAULT_THINKING: ThinkingLevel =
   (process.env.NEXT_PUBLIC_GEMINI_THINKING_LEVEL as ThinkingLevel) || "low";
 
-const SCHEMA_LINK_TEMPLATE = (schema: string, question: string) =>
-  `You are an expert SQL developer specializing in SQLite. Given a database schema and a natural language question, generate 5 diverse candidate SQL SELECT queries that might answer the question.
+/** Extract the "== Database Schema ==" section from a pipeline prompt. */
+function extractSchemaSection(prompt: string): {
+  before: string;
+  schema: string;
+  after: string;
+} | null {
+  // Find start: "== Database Schema ==" or similar
+  const startRe = /^==\s*Database Schema\s*==\s*$/m;
+  const startMatch = startRe.exec(prompt);
+  if (!startMatch) return null;
 
-== Database Schema ==
-${schema}
+  const schemaStart = startMatch.index + startMatch[0].length;
 
-== Universal SQLite Formulation Rules ==
-1. **Strict Dialect:** Use only valid SQLite syntax.
-2. **Quoting:** Wrap ALL table and column identifiers in double quotes (e.g., "table_name"."column_name") to prevent reserved keyword conflicts. Strings must use single quotes.
-3. **Mathematical Precision:** SQLite performs integer division by default. For any calculation involving ratios, percentages, or division, ALWAYS cast the numerator to REAL (e.g., \`CAST(SUM(...) AS REAL) * 100 / COUNT(...)\`).
-4. **Deduplication:** When asked to "list," "name," or "show" categories, types, or items, default to using the \`DISTINCT\` keyword in your SELECT clause to prevent duplicate row returns, unless explicit counts or totals are requested.
-5. **Completeness:** If the question asks for multiple specific data points (e.g., "Find the name and whether it is active"), ensure your SELECT clause explicitly includes columns for all requested points.
-6. **Output Format:** Return ONLY the SQL queries wrapped in fenced code blocks (\`\`\`sql ... \`\`\`). Do not include any explanation, comments, or conversational text outside the code blocks.
+  // Find end: the next "== ... ==" section header
+  const afterStart = prompt.slice(schemaStart);
+  const endRe = /^==\s*.+?\s*==\s*$/m;
+  const endMatch = endRe.exec(afterStart);
 
-== Question ==
-${question}
+  if (endMatch) {
+    const schemaEnd = schemaStart + endMatch.index;
+    return {
+      before: prompt.slice(0, startMatch.index + startMatch[0].length),
+      schema: prompt.slice(schemaStart, schemaEnd).trim(),
+      after: prompt.slice(schemaEnd),
+    };
+  }
 
-Generate exactly 5 candidate SQL queries. Each query should explore a different approach — different join paths, column selections, aggregation strategies, or interpretations of the question. Use the column descriptions from the database schema to understand what each column contains.
-
-Rules:
-- Each query must be a valid SQLite SELECT statement.
-- Use single quotes for string literals and double quotes for identifiers.
-- Return each query in a numbered fenced code block.
-
-Query 1:
-\`\`\`sql
-...
-\`\`\`
-
-Query 2:
-\`\`\`sql
-...
-\`\`\`
-
-Query 3:
-\`\`\`sql
-...
-\`\`\`
-
-Query 4:
-\`\`\`sql
-...
-\`\`\`
-
-Query 5:
-\`\`\`sql
-...
-\`\`\``;
+  // No next section — schema goes to end
+  return {
+    before: prompt.slice(0, startMatch.index + startMatch[0].length),
+    schema: afterStart.trim(),
+    after: "",
+  };
+}
 
 interface GeminiResult {
   text: string;
@@ -91,11 +77,6 @@ export default function GeminiPanel({
   const [tab, setTab] = useState<Tab>("sql-gen");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(DEFAULT_THINKING);
 
-  // Schema fetching — only for schema linking tab
-  const [schema, setSchema] = useState<string | null>(null);
-  const [schemaLoading, setSchemaLoading] = useState(false);
-  const [schemaError, setSchemaError] = useState<string | null>(null);
-
   // SQL generation state — uses the pipeline prompt from the JSON
   const [sqlPrompt, setSqlPrompt] = useState(pipelinePrompt ?? "");
   const [sqlResult, setSqlResult] = useState<GeminiResult | null>(null);
@@ -103,8 +84,12 @@ export default function GeminiPanel({
   const [sqlError, setSqlError] = useState<string | null>(null);
   const [sqlElapsed, setSqlElapsed] = useState(0);
 
-  // Schema linking state
-  const [linkPrompt, setLinkPrompt] = useState("");
+  // Schema linking state — editable schema extracted from the prompt
+  const originalSchema = useMemo(
+    () => (pipelinePrompt ? extractSchemaSection(pipelinePrompt) : null),
+    [pipelinePrompt],
+  );
+  const [editedSchema, setEditedSchema] = useState(originalSchema?.schema ?? "");
   const [linkResult, setLinkResult] = useState<GeminiResult | null>(null);
   const [linkLoading, setLinkLoading] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
@@ -120,33 +105,6 @@ export default function GeminiPanel({
     }
   }, []);
 
-  // Fetch schema for the schema linking tab (only when that tab is first opened)
-  useEffect(() => {
-    if (!open || schema !== null || schemaLoading) return;
-    // Only fetch if we're on the schema-link tab or if we have no pipeline prompt
-    if (tab !== "schema-link" && pipelinePrompt) return;
-
-    setSchemaLoading(true);
-    fetch(`/api/schema?db_id=${encodeURIComponent(dbId)}`)
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.error) {
-          setSchemaError(data.error);
-        } else {
-          setSchema(data.schema);
-          setLinkPrompt(SCHEMA_LINK_TEMPLATE(data.schema, question));
-          // If no pipeline prompt, use schema to build a fallback SQL gen prompt
-          if (!pipelinePrompt) {
-            setSqlPrompt(
-              `You are an expert SQL query writer. Given the following SQLite database schema and a natural language question, write a SQL query that answers the question.\n\n## Database Schema\n${data.schema}\n\n## Question\n${question}\n\n## Instructions\n- Write a single SQLite-compatible SQL query\n- Use only tables and columns from the schema above\n- Return ONLY the SQL query wrapped in \`\`\`sql ... \`\`\` tags`,
-            );
-          }
-        }
-      })
-      .catch((e) => setSchemaError(e.message))
-      .finally(() => setSchemaLoading(false));
-  }, [open, schema, schemaLoading, dbId, question, tab, pipelinePrompt]);
-
   useEffect(
     () => () => {
       clearTimer();
@@ -154,6 +112,16 @@ export default function GeminiPanel({
     },
     [clearTimer],
   );
+
+  /** Rebuild the full prompt with the edited schema section. */
+  const rebuiltPrompt = useMemo(() => {
+    if (!originalSchema) return sqlPrompt;
+    return `${originalSchema.before}\n${editedSchema}\n\n${originalSchema.after}`;
+  }, [originalSchema, editedSchema, sqlPrompt]);
+
+  const schemaEdited = originalSchema
+    ? editedSchema !== originalSchema.schema
+    : false;
 
   async function runGemini(
     prompt: string,
@@ -209,6 +177,14 @@ export default function GeminiPanel({
     setLinkLoading(false);
   }
 
+  /** Apply edited schema back into the SQL gen prompt */
+  function applySchemaToPrompt() {
+    if (!originalSchema) return;
+    const newPrompt = `${originalSchema.before}\n${editedSchema}\n\n${originalSchema.after}`;
+    setSqlPrompt(newPrompt);
+    setTab("sql-gen");
+  }
+
   if (!open) {
     return (
       <div className="mt-3">
@@ -229,8 +205,31 @@ export default function GeminiPanel({
     );
   }
 
+  if (!pipelinePrompt) {
+    return (
+      <div className="mt-3 rounded-md border border-gray-800 bg-gray-900/40 p-3">
+        <div className="flex items-center justify-between">
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="flex items-center gap-2 text-xs text-gray-400 hover:text-gray-200 transition-colors cursor-pointer"
+          >
+            <svg className="w-3 h-3 rotate-90" fill="currentColor" viewBox="0 0 20 20">
+              <path d="M6 4l8 6-8 6V4z" />
+            </svg>
+            Gemini SQL Gen &amp; Schema Linking
+          </button>
+        </div>
+        <p className="mt-2 text-xs text-gray-500">
+          No pipeline prompt available for this question.
+        </p>
+      </div>
+    );
+  }
+
   const isLoading = sqlLoading || linkLoading;
   const currentElapsed = tab === "sql-gen" ? sqlElapsed : linkElapsed;
+  const sqlPromptEdited = sqlPrompt !== pipelinePrompt;
 
   function renderUsage(result: GeminiResult) {
     if (!result.usage) return null;
@@ -260,15 +259,6 @@ export default function GeminiPanel({
       </details>
     );
   }
-
-  /** Extract all SQL blocks from a multi-query response */
-  function extractAllSql(text: string): string[] {
-    const matches = [...text.matchAll(/```sql\s*([\s\S]*?)```/gi)];
-    return matches.map((m) => m[1].trim()).filter(Boolean);
-  }
-
-  const hasSqlPrompt = sqlPrompt.trim().length > 0;
-  const sqlPromptEdited = pipelinePrompt ? sqlPrompt !== pipelinePrompt : false;
 
   return (
     <div className="mt-3 space-y-3 rounded-md border border-gray-800 bg-gray-900/40 p-3">
@@ -319,9 +309,6 @@ export default function GeminiPanel({
           }`}
         >
           SQL Generation
-          {pipelinePrompt && (
-            <span className="ml-1 text-[9px] text-gray-600">(pipeline prompt)</span>
-          )}
         </button>
         <button
           type="button"
@@ -333,211 +320,206 @@ export default function GeminiPanel({
           }`}
         >
           Schema Linking
+          {schemaEdited && (
+            <span className="ml-1 text-[9px] text-yellow-400">(edited)</span>
+          )}
         </button>
       </div>
 
-      {/* SQL Generation tab */}
+      {/* ─── SQL Generation tab ─── */}
       {tab === "sql-gen" && (
         <div className="space-y-3">
-          {!hasSqlPrompt && !pipelinePrompt ? (
-            <div className="text-xs text-gray-500">
-              No pipeline prompt available for this question. Switch to Schema
-              Linking to fetch the database schema and generate a prompt.
+          <p className="text-[10px] text-gray-600 leading-relaxed">
+            The actual prompt used by InsightXpert for this question. Edit and
+            run via Gemini. Use the Schema Linking tab to edit the schema section.
+          </p>
+
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+                Prompt
+              </span>
+              {sqlPromptEdited && (
+                <span className="text-[10px] rounded px-1.5 py-0.5 bg-yellow-900/30 text-yellow-400">
+                  edited
+                </span>
+              )}
+              <span className="text-[10px] text-gray-600 ml-auto">
+                {sqlPrompt.length.toLocaleString()} chars
+              </span>
             </div>
-          ) : (
+            <textarea
+              value={sqlPrompt}
+              onChange={(e) => setSqlPrompt(e.target.value)}
+              spellCheck={false}
+              className="w-full rounded-md bg-gray-950 border border-gray-800 p-3 text-[11px] leading-relaxed text-gray-300 font-mono max-h-[400px] min-h-[150px] overflow-auto resize-y focus:outline-none focus:border-blue-700"
+            />
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() =>
+                runGemini(
+                  sqlPrompt,
+                  setSqlResult,
+                  setSqlLoading,
+                  setSqlError,
+                  setSqlElapsed,
+                )
+              }
+              disabled={isLoading || !sqlPrompt.trim()}
+              className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+            >
+              {sqlLoading ? "Running..." : "Generate SQL"}
+            </button>
+            {sqlPromptEdited && (
+              <button
+                type="button"
+                onClick={() => setSqlPrompt(pipelinePrompt)}
+                className="text-[10px] text-gray-500 hover:text-gray-300 underline cursor-pointer"
+              >
+                reset to original
+              </button>
+            )}
+            {sqlLoading && (
+              <>
+                <span className="text-xs text-gray-500 tabular-nums">
+                  {currentElapsed}s
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCancel}
+                  className="text-xs text-red-400 hover:text-red-300 cursor-pointer"
+                >
+                  cancel
+                </button>
+              </>
+            )}
+          </div>
+
+          {sqlError && (
+            <div className="rounded-md border border-red-900/50 bg-red-950/20 px-3 py-2">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-red-400">
+                Error
+              </span>
+              <pre className="mt-1 text-xs text-red-300 font-mono whitespace-pre-wrap max-h-[200px] overflow-auto">
+                {sqlError}
+              </pre>
+            </div>
+          )}
+
+          {sqlResult && (
+            <div className="space-y-3">
+              {renderUsage(sqlResult)}
+              {renderThinking(sqlResult)}
+
+              {sqlResult.sql && (
+                <div>
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-blue-400">
+                    Generated SQL
+                  </span>
+                  <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-gray-950 border border-gray-800 p-3 text-[11px] leading-relaxed text-gray-300 font-mono max-h-[200px] overflow-auto">
+                    {sqlResult.sql}
+                  </pre>
+                </div>
+              )}
+
+              <details className="text-xs">
+                <summary className="text-gray-500 hover:text-gray-300 cursor-pointer">
+                  Full response
+                </summary>
+                <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-gray-950 border border-gray-800 p-3 text-[11px] leading-relaxed text-gray-400 font-mono max-h-[300px] overflow-auto">
+                  {sqlResult.text}
+                </pre>
+              </details>
+
+              {sqlResult.sql && (
+                <>
+                  <div className="text-[10px] text-gray-500">
+                    {sqlResult.sql !== predSql && (
+                      <span className="text-yellow-500">
+                        SQL differs from original prediction.{" "}
+                      </span>
+                    )}
+                    Run below to compare with gold SQL.
+                  </div>
+                  <SqlRunner dbId={dbId} predSql={sqlResult.sql} goldSql={goldSql} />
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ─── Schema Linking tab ─── */}
+      {tab === "schema-link" && (
+        <div className="space-y-3">
+          {originalSchema ? (
             <>
               <p className="text-[10px] text-gray-600 leading-relaxed">
-                {pipelinePrompt
-                  ? "This is the actual prompt used by the InsightXpert pipeline for this question. Edit it and run via Gemini."
-                  : "Edit the prompt below and send it to Gemini for SQL generation."}
+                This is the <strong className="text-gray-400">Database Schema</strong> section
+                extracted from the pipeline prompt. Edit it to add/remove tables and columns,
+                then apply it back to the SQL generation prompt or run the modified prompt
+                directly.
               </p>
 
               <div>
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
-                    Prompt
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-500">
+                    Database Schema
                   </span>
-                  {sqlPromptEdited && (
+                  {schemaEdited && (
                     <span className="text-[10px] rounded px-1.5 py-0.5 bg-yellow-900/30 text-yellow-400">
                       edited
                     </span>
                   )}
                   <span className="text-[10px] text-gray-600 ml-auto">
-                    {sqlPrompt.length.toLocaleString()} chars
+                    {editedSchema.length.toLocaleString()} chars
                   </span>
                 </div>
                 <textarea
-                  value={sqlPrompt}
-                  onChange={(e) => setSqlPrompt(e.target.value)}
+                  value={editedSchema}
+                  onChange={(e) => setEditedSchema(e.target.value)}
                   spellCheck={false}
-                  className="w-full rounded-md bg-gray-950 border border-gray-800 p-3 text-[11px] leading-relaxed text-gray-300 font-mono max-h-[400px] min-h-[150px] overflow-auto resize-y focus:outline-none focus:border-blue-700"
+                  className="w-full rounded-md bg-gray-950 border border-emerald-900/40 p-3 text-[11px] leading-relaxed text-gray-300 font-mono max-h-[500px] min-h-[200px] overflow-auto resize-y focus:outline-none focus:border-emerald-700"
                 />
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
                 <button
                   type="button"
-                  onClick={() =>
-                    runGemini(
-                      sqlPrompt,
-                      setSqlResult,
-                      setSqlLoading,
-                      setSqlError,
-                      setSqlElapsed,
-                    )
-                  }
-                  disabled={isLoading || !sqlPrompt.trim()}
-                  className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                  onClick={applySchemaToPrompt}
+                  disabled={!schemaEdited}
+                  className="rounded-md bg-emerald-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
                 >
-                  {sqlLoading ? "Running..." : "Generate SQL"}
+                  Apply to Prompt &amp; Switch to SQL Gen
                 </button>
-                {pipelinePrompt && sqlPromptEdited && (
-                  <button
-                    type="button"
-                    onClick={() => setSqlPrompt(pipelinePrompt)}
-                    className="text-[10px] text-gray-500 hover:text-gray-300 underline cursor-pointer"
-                  >
-                    reset to original
-                  </button>
-                )}
-                {sqlLoading && (
-                  <>
-                    <span className="text-xs text-gray-500 tabular-nums">
-                      {currentElapsed}s
-                    </span>
-                    <button
-                      type="button"
-                      onClick={handleCancel}
-                      className="text-xs text-red-400 hover:text-red-300 cursor-pointer"
-                    >
-                      cancel
-                    </button>
-                  </>
-                )}
-              </div>
-
-              {sqlError && (
-                <div className="rounded-md border border-red-900/50 bg-red-950/20 px-3 py-2">
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-red-400">
-                    Error
-                  </span>
-                  <pre className="mt-1 text-xs text-red-300 font-mono whitespace-pre-wrap max-h-[200px] overflow-auto">
-                    {sqlError}
-                  </pre>
-                </div>
-              )}
-
-              {sqlResult && (
-                <div className="space-y-3">
-                  {renderUsage(sqlResult)}
-                  {renderThinking(sqlResult)}
-
-                  {/* Generated SQL */}
-                  {sqlResult.sql && (
-                    <div>
-                      <span className="text-[10px] font-semibold uppercase tracking-wider text-blue-400">
-                        Generated SQL
-                      </span>
-                      <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-gray-950 border border-gray-800 p-3 text-[11px] leading-relaxed text-gray-300 font-mono max-h-[200px] overflow-auto">
-                        {sqlResult.sql}
-                      </pre>
-                    </div>
-                  )}
-
-                  {/* Full response (collapsible) */}
-                  <details className="text-xs">
-                    <summary className="text-gray-500 hover:text-gray-300 cursor-pointer">
-                      Full response
-                    </summary>
-                    <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-gray-950 border border-gray-800 p-3 text-[11px] leading-relaxed text-gray-400 font-mono max-h-[300px] overflow-auto">
-                      {sqlResult.text}
-                    </pre>
-                  </details>
-
-                  {/* Run the generated SQL */}
-                  {sqlResult.sql && (
-                    <>
-                      <div className="text-[10px] text-gray-500">
-                        {sqlResult.sql !== predSql && (
-                          <span className="text-yellow-500">
-                            SQL differs from original prediction.{" "}
-                          </span>
-                        )}
-                        Run below to compare with gold SQL.
-                      </div>
-                      <SqlRunner dbId={dbId} predSql={sqlResult.sql} goldSql={goldSql} />
-                    </>
-                  )}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
-      {/* Schema Linking tab */}
-      {tab === "schema-link" && (
-        <div className="space-y-3">
-          {/* Loading schema */}
-          {schemaLoading && (
-            <div className="text-xs text-gray-500">Loading database schema...</div>
-          )}
-          {schemaError && (
-            <div className="rounded-md border border-red-900/50 bg-red-950/20 px-3 py-2 text-xs text-red-400">
-              Schema error: {schemaError}
-            </div>
-          )}
-
-          {schema ? (
-            <>
-              <p className="text-[10px] text-gray-600 leading-relaxed">
-                Schema linking prompt (based on the trial_query template from InsightXpert).
-                Generates 5 diverse candidate SQL queries. Edit and run via Gemini.
-              </p>
-
-              <div>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
-                    Prompt
-                  </span>
-                  <span className="text-[10px] text-gray-600 ml-auto">
-                    {linkPrompt.length.toLocaleString()} chars
-                  </span>
-                </div>
-                <textarea
-                  value={linkPrompt}
-                  onChange={(e) => setLinkPrompt(e.target.value)}
-                  spellCheck={false}
-                  className="w-full rounded-md bg-gray-950 border border-gray-800 p-3 text-[11px] leading-relaxed text-gray-300 font-mono max-h-[400px] min-h-[150px] overflow-auto resize-y focus:outline-none focus:border-blue-700"
-                />
-              </div>
-
-              <div className="flex items-center gap-3">
                 <button
                   type="button"
                   onClick={() =>
                     runGemini(
-                      linkPrompt,
+                      rebuiltPrompt,
                       setLinkResult,
                       setLinkLoading,
                       setLinkError,
                       setLinkElapsed,
                     )
                   }
-                  disabled={isLoading || !linkPrompt.trim()}
-                  className="rounded-md bg-emerald-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                  disabled={isLoading || !editedSchema.trim()}
+                  className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
                 >
-                  {linkLoading ? "Running..." : "Run Schema Linking"}
+                  {linkLoading ? "Running..." : "Run with Edited Schema"}
                 </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setLinkPrompt(SCHEMA_LINK_TEMPLATE(schema, question))
-                  }
-                  className="text-[10px] text-gray-500 hover:text-gray-300 underline cursor-pointer"
-                >
-                  reset prompt
-                </button>
+                {schemaEdited && (
+                  <button
+                    type="button"
+                    onClick={() => setEditedSchema(originalSchema.schema)}
+                    className="text-[10px] text-gray-500 hover:text-gray-300 underline cursor-pointer"
+                  >
+                    reset schema
+                  </button>
+                )}
                 {linkLoading && (
                   <>
                     <span className="text-xs text-gray-500 tabular-nums">
@@ -553,6 +535,18 @@ export default function GeminiPanel({
                   </>
                 )}
               </div>
+
+              {/* Preview the rebuilt prompt (collapsible) */}
+              {schemaEdited && (
+                <details className="text-xs">
+                  <summary className="text-gray-500 hover:text-gray-300 cursor-pointer">
+                    Preview full prompt with edited schema ({rebuiltPrompt.length.toLocaleString()} chars)
+                  </summary>
+                  <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-gray-950 border border-gray-800 p-3 text-[11px] leading-relaxed text-gray-400 font-mono max-h-[300px] overflow-auto">
+                    {rebuiltPrompt}
+                  </pre>
+                </details>
+              )}
 
               {linkError && (
                 <div className="rounded-md border border-red-900/50 bg-red-950/20 px-3 py-2">
@@ -570,50 +564,40 @@ export default function GeminiPanel({
                   {renderUsage(linkResult)}
                   {renderThinking(linkResult)}
 
-                  {/* Schema linking response */}
-                  <div>
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
-                      Schema Linking Result
-                    </span>
-                    <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-gray-950 border border-gray-800 p-3 text-[11px] leading-relaxed text-gray-300 font-mono max-h-[400px] overflow-auto">
+                  {linkResult.sql && (
+                    <div>
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-blue-400">
+                        Generated SQL (from edited schema)
+                      </span>
+                      <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-gray-950 border border-gray-800 p-3 text-[11px] leading-relaxed text-gray-300 font-mono max-h-[200px] overflow-auto">
+                        {linkResult.sql}
+                      </pre>
+                    </div>
+                  )}
+
+                  <details className="text-xs">
+                    <summary className="text-gray-500 hover:text-gray-300 cursor-pointer">
+                      Full response
+                    </summary>
+                    <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-gray-950 border border-gray-800 p-3 text-[11px] leading-relaxed text-gray-400 font-mono max-h-[300px] overflow-auto">
                       {linkResult.text}
                     </pre>
-                  </div>
+                  </details>
 
-                  {/* Extract and display all SQL candidates */}
-                  {(() => {
-                    const allSql = extractAllSql(linkResult.text);
-                    if (allSql.length === 0) return null;
-                    return (
-                      <div className="space-y-3">
-                        <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
-                          Candidate Queries ({allSql.length})
-                        </span>
-                        {allSql.map((sql, i) => (
-                          <div key={i} className="space-y-1">
-                            <div className="text-[10px] text-gray-500">
-                              Query {i + 1}:
-                            </div>
-                            <SqlRunner
-                              dbId={dbId}
-                              predSql={sql}
-                              goldSql={goldSql}
-                            />
-                          </div>
-                        ))}
-                      </div>
-                    );
-                  })()}
+                  {linkResult.sql && (
+                    <SqlRunner
+                      dbId={dbId}
+                      predSql={linkResult.sql}
+                      goldSql={goldSql}
+                    />
+                  )}
                 </div>
               )}
             </>
           ) : (
-            !schemaLoading &&
-            !schemaError && (
-              <div className="text-xs text-gray-500">
-                Schema will be loaded when this tab is opened.
-              </div>
-            )
+            <p className="text-xs text-gray-500">
+              Could not extract the Database Schema section from the pipeline prompt.
+            </p>
           )}
         </div>
       )}
