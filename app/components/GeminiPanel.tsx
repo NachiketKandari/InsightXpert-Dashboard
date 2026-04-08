@@ -90,6 +90,9 @@ export default function GeminiPanel({
     [pipelinePrompt],
   );
   const [editedSchema, setEditedSchema] = useState(originalSchema?.schema ?? "");
+  const [perfectSchema, setPerfectSchema] = useState<string | null>(null);
+  const [perfectLoading, setPerfectLoading] = useState(false);
+  const [perfectError, setPerfectError] = useState<string | null>(null);
   const [linkResult, setLinkResult] = useState<GeminiResult | null>(null);
   const [linkLoading, setLinkLoading] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
@@ -183,6 +186,64 @@ export default function GeminiPanel({
     const newPrompt = `${originalSchema.before}\n${editedSchema}\n\n${originalSchema.after}`;
     setSqlPrompt(newPrompt);
     setTab("sql-gen");
+  }
+
+  /** Fetch perfect schema linking for this question */
+  async function fetchPerfectSchema() {
+    setPerfectLoading(true);
+    setPerfectError(null);
+    try {
+      const res = await fetch(
+        `/api/perfect-schema?question=${encodeURIComponent(question)}`,
+      );
+      const data = await res.json();
+      if (data.error) {
+        setPerfectError(data.error);
+      } else {
+        setPerfectSchema(data.schema);
+        setEditedSchema(data.schema);
+      }
+    } catch (e: unknown) {
+      setPerfectError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPerfectLoading(false);
+    }
+  }
+
+  /** Run with perfect schema: swap in perfect schema and run immediately */
+  async function runWithPerfectSchema() {
+    if (!originalSchema) return;
+
+    // Fetch perfect schema if not already loaded
+    let schema = perfectSchema;
+    if (!schema) {
+      setPerfectLoading(true);
+      setPerfectError(null);
+      try {
+        const res = await fetch(
+          `/api/perfect-schema?question=${encodeURIComponent(question)}`,
+        );
+        const data = await res.json();
+        if (data.error) {
+          setPerfectError(data.error);
+          setPerfectLoading(false);
+          return;
+        }
+        schema = data.schema;
+        setPerfectSchema(data.schema);
+        setEditedSchema(data.schema);
+      } catch (e: unknown) {
+        setPerfectError(e instanceof Error ? e.message : String(e));
+        setPerfectLoading(false);
+        return;
+      } finally {
+        setPerfectLoading(false);
+      }
+    }
+
+    // Build prompt with perfect schema and run
+    const perfectPrompt = `${originalSchema.before}\n${schema}\n\n${originalSchema.after}`;
+    runGemini(perfectPrompt, setLinkResult, setLinkLoading, setLinkError, setLinkElapsed);
   }
 
   if (!open) {
@@ -511,6 +572,14 @@ export default function GeminiPanel({
                 >
                   {linkLoading ? "Running..." : "Run with Edited Schema"}
                 </button>
+                <button
+                  type="button"
+                  onClick={runWithPerfectSchema}
+                  disabled={isLoading || perfectLoading}
+                  className="rounded-md bg-amber-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                >
+                  {perfectLoading ? "Loading..." : "Run with Perfect Schema"}
+                </button>
                 {schemaEdited && (
                   <button
                     type="button"
@@ -518,6 +587,15 @@ export default function GeminiPanel({
                     className="text-[10px] text-gray-500 hover:text-gray-300 underline cursor-pointer"
                   >
                     reset schema
+                  </button>
+                )}
+                {perfectSchema && (
+                  <button
+                    type="button"
+                    onClick={() => setEditedSchema(perfectSchema)}
+                    className="text-[10px] text-amber-500 hover:text-amber-300 underline cursor-pointer"
+                  >
+                    load perfect schema
                   </button>
                 )}
                 {linkLoading && (
@@ -535,6 +613,12 @@ export default function GeminiPanel({
                   </>
                 )}
               </div>
+
+              {perfectError && (
+                <div className="text-[10px] text-amber-400">
+                  Perfect schema: {perfectError}
+                </div>
+              )}
 
               {/* Preview the rebuilt prompt (collapsible) */}
               {schemaEdited && (
