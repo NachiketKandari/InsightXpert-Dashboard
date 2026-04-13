@@ -153,7 +153,7 @@ export default function PromptEditor({ onChange }: Props) {
             value={currentContent}
             onChange={(e) => handleEdit(activeTab, e.target.value)}
             spellCheck={false}
-            className="w-full bg-gray-950 px-3 py-2 text-[11px] leading-relaxed text-gray-300 font-mono min-h-[250px] max-h-[500px] resize-y focus:outline-none border-none"
+            className="w-full bg-gray-950 px-3 py-2 text-[11px] leading-relaxed text-gray-300 font-mono min-h-[500px] max-h-[900px] resize-y focus:outline-none border-none"
             style={{ tabSize: 2 }}
           />
         </div>
