@@ -118,6 +118,55 @@ function findResultFiles(dir) {
   return results;
 }
 
+function isResultFile(name) {
+  return (name.startsWith("eval_results_") || name.startsWith("diagnosed_")) && name.endsWith(".json");
+}
+
+function readSummary(filePath, relPath) {
+  try {
+    const content = fs.readFileSync(filePath, "utf-8");
+    let data;
+    const resultsIdx = content.indexOf('"results"');
+    if (resultsIdx > 0) {
+      const truncated = content.slice(0, resultsIdx).replace(/,\s*$/, "") + "}";
+      try { data = JSON.parse(truncated); } catch { data = JSON.parse(content); }
+    } else {
+      data = JSON.parse(content);
+    }
+    const dirName = path.dirname(relPath);
+    const match = path.basename(filePath).match(/eval_results_(\d{8}_\d{6})/);
+    const timestamp = match ? match[1] : "";
+    let h = 0;
+    for (let i = 0; i < relPath.length; i++) {
+      h = ((h << 5) - h + relPath.charCodeAt(i)) | 0;
+    }
+    const id = Math.abs(h).toString(36);
+    return {
+      id,
+      filePath: relPath,
+      dirName,
+      timestamp,
+      total: data.total ?? 0,
+      correct: data.correct ?? 0,
+      accuracy: data.accuracy ?? 0,
+      accuracyRelaxed: data.accuracy_relaxed ?? 0,
+      byDifficulty: data.by_difficulty ?? {},
+      runConfig: data.run_config ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function uploadObject(key, body, contentType) {
+  const { url, headers } = signRequest("PUT", key, body, contentType);
+  const resp = await fetch(url, { method: "PUT", headers, body });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
+  }
+}
+
 // --- Main ---
 
 const files = findResultFiles(SOURCE_DIR);
@@ -127,21 +176,11 @@ let uploaded = 0;
 let failed = 0;
 
 for (const file of files) {
-  const key = path.relative(SOURCE_DIR, file);
+  const key = path.relative(SOURCE_DIR, file).split(path.sep).join("/");
   const body = fs.readFileSync(file);
 
   try {
-    const { url, headers } = signRequest("PUT", key, body, "application/json");
-    const resp = await fetch(url, {
-      method: "PUT",
-      headers,
-      body,
-    });
-
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
-    }
+    await uploadObject(key, body, "application/json");
     uploaded++;
     process.stdout.write(`\r  Uploaded ${uploaded}/${files.length}`);
   } catch (err) {
@@ -151,3 +190,23 @@ for (const file of files) {
 }
 
 console.log(`\nDone: ${uploaded} uploaded, ${failed} failed`);
+
+// --- Build & upload _manifest.json ---
+
+console.log("\nBuilding _manifest.json ...");
+const summaries = [];
+for (const file of files) {
+  const relPath = path.relative(SOURCE_DIR, file).split(path.sep).join("/");
+  if (!isResultFile(path.basename(file))) continue;
+  const s = readSummary(file, relPath);
+  if (s) summaries.push(s);
+}
+summaries.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+
+const manifestBody = Buffer.from(JSON.stringify({ results: summaries }));
+try {
+  await uploadObject("_manifest.json", manifestBody, "application/json");
+  console.log(`Uploaded _manifest.json (${summaries.length} entries, ${manifestBody.length} bytes)`);
+} catch (err) {
+  console.error(`Failed to upload _manifest.json — ${err.message}`);
+}
